@@ -379,6 +379,12 @@ private struct GeneralTab: View {
             }
 
             Section("Cycle") {
+                Toggle("Continue into overtime", isOn: $settings.overtimeEnabled)
+                    .toggleStyle(.switch)
+                Text("Keep tracking after zero until you press Finish. Applies to the next focus session; auto-cycle waits until focus ends.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Toggle("Auto-cycle phases", isOn: $settings.autoCycle)
                     .toggleStyle(.switch)
                 MinuteRow(label: "Sessions per cycle",

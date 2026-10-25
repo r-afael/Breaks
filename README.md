@@ -17,6 +17,36 @@ I built Breaks because every other timer either nagged me too much, hid in a Doc
 ![Swift](https://img.shields.io/badge/Swift-5.0-orange)
 ![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-purple)
 
+## Overtime fork
+
+This fork adds sessions that continue until you finish them. Source: [r-afael/Breaks](https://github.com/r-afael/Breaks).
+
+1. Set **Work** to 20 minutes in Settings → General, and leave **Continue into overtime** on (the default).
+2. Name your focus or use the dashboard's **… → This block is for…** field, then start.
+3. At zero, the timer notifies you once and counts up as `+MM:SS`. It does not start a break automatically.
+4. Press **Finish** to save the full duration. For example, finishing after seven extra minutes records one 27-minute session. Pause/Resume works before and after zero; pauses do not count toward focused time.
+5. Open **Statistics → Sessions** for the saved label, date, exact duration and overtime. Reflection is optional; your session is already saved. History has no automatic retention cutoff.
+6. Enable **Settings → More → Calendar export** and grant Calendar access to add finished sessions automatically. Events span the actual first start to last active moment; their notes separately report focus, overtime and pauses. Calendar permission is optional, and a failed export does not lose the journal entry.
+
+A running timer counts time while your Mac sleeps or the app is closed, and resumes correctly on relaunch. A paused timer stays paused. New installations leave **Pause when I step away** off; turn it on if you want automatic idle pauses. Changing durations or the overtime setting affects the next session, not an active one. Reset discards the active session; the Finish/Skip hotkey saves active focus.
+
+### Build this fork locally
+
+```sh
+./scripts/build-local.sh
+open "build/Breaks Overtime.app"
+```
+
+This produces a locally signed app with a separate bundle identifier, so it can coexist with upstream Breaks. It is not an Apple-notarized release. The upstream App Store/DMG links below do not contain these changes.
+
+### Regression checks
+
+```sh
+./scripts/test-overtime.sh
+```
+
+The checks compile the production timer and persistence code, use isolated preferences and a controllable clock, and inspect Calendar event fields without saving real events or requesting permissions. Xcode 26 or newer is required for these scripts.
+
 ## What it does
 
 - Lives in the menu bar. Click the icon, get a popover. No Dock clutter, no extra window.
@@ -108,7 +138,7 @@ A few things worth flagging if you go editing:
 
 - **Tick decoupling.** `BreakTimer.remaining` only updates at action boundaries (start, pause, reset, fire). Per-second updates flow through a separate `TickClock` `ObservableObject`. That keeps the popover view tree from re-rendering every single second. If you add UI that needs the live countdown, observe `TickClock`, not `BreakTimer`.
 - **Persistence per-property.** Each `@Published` setting writes itself in its own `didSet`. There's no central save call. New settings should follow the same pattern.
-- **Pruning at write time.** `SessionHistory` is capped at 120 days and `FocusJournal` logs at 30, pruned when you write rather than when you read. That keeps cold-start reads cheap.
+- **Session retention.** `SessionHistory` and `FocusJournal` retain completed sessions without a time cutoff. The session list loads more rows on demand.
 - **Streak math.** `SessionHistory.streakSnapshot(pauseDayBudget:)` walks day-by-day from the earliest record forward and decays by 1 per missed day, except the first N missed days each ISO week are absorbed by the budget. That's the only non-trivial bit of logic in the app.
 - **Explicit imports.** The project sets `SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES`, so every file has to import what it actually uses (`import Combine` for `@Published`, etc). Don't rely on transitive imports through `SwiftUI`.
 

@@ -25,6 +25,14 @@ struct FocusBlockLog: Codable, Identifiable {
     var outcome: FocusOutcome
     let projectID: UUID?
     let projectName: String?
+    // Optional fields preserve decoding of journals written before overtime support.
+    let durationSeconds: Int?
+    let targetSeconds: Int?
+    let startedAt: Date?
+
+    var actualSeconds: Int { durationSeconds ?? minutes * 60 }
+    var durationText: String { FocusDuration.text(actualSeconds) }
+    var overtimeSeconds: Int { max(0, actualSeconds - (targetSeconds ?? actualSeconds)) }
 
     init(id: UUID = UUID(),
          date: Date,
@@ -32,7 +40,10 @@ struct FocusBlockLog: Codable, Identifiable {
          minutes: Int,
          outcome: FocusOutcome,
          projectID: UUID? = nil,
-         projectName: String? = nil) {
+         projectName: String? = nil,
+         durationSeconds: Int? = nil,
+         targetSeconds: Int? = nil,
+         startedAt: Date? = nil) {
         self.id = id
         self.date = date
         self.label = label
@@ -40,6 +51,9 @@ struct FocusBlockLog: Codable, Identifiable {
         self.outcome = outcome
         self.projectID = projectID
         self.projectName = projectName
+        self.durationSeconds = durationSeconds
+        self.targetSeconds = targetSeconds
+        self.startedAt = startedAt
     }
 }
 
@@ -66,6 +80,7 @@ private struct FocusJournalState: Codable {
     var previousFocus: String?
     var blockLogs: [FocusBlockLog]
     var currentProjectID: UUID?
+    var pendingBlock: FocusBlockLog?
 }
 
 @MainActor
@@ -80,13 +95,15 @@ final class FocusJournal: ObservableObject {
     @Published var currentProjectID: UUID? { didSet { save() } }
     weak var projectLibrary: FocusProjectLibrary?
 
-    private let ud = UserDefaults.shared
+    private let ud: UserDefaults
     private let key = "focusJournalState"
 
-    init() {
+    init(defaults: UserDefaults? = nil) {
+        self.ud = defaults ?? .shared
         let today = Calendar.current.startOfDay(for: Date())
         if let data = ud.data(forKey: key),
            let state = try? JSONDecoder().decode(FocusJournalState.self, from: data) {
+            pendingBlock = state.pendingBlock
             let savedDay = Calendar.current.startOfDay(for: state.day)
             if Calendar.current.isDate(savedDay, inSameDayAs: today) {
                 day = savedDay
@@ -116,7 +133,6 @@ final class FocusJournal: ObservableObject {
             blockLogs = []
             currentProjectID = nil
         }
-        trimLogs()
         save()
     }
 
@@ -163,16 +179,24 @@ final class FocusJournal: ObservableObject {
         blockLogs.removeAll { Calendar.current.isDateInToday($0.date) }
     }
 
-    func recordCompletedWork(minutes: Int) {
+    func recordCompletedWork(session: CompletedFocusSession) {
+        // A restored timer must never duplicate a session already committed to the journal.
+        guard !blockLogs.contains(where: { $0.id == session.id }) else { return }
         let project = projectLibrary?.project(for: currentProjectID)
-        pendingBlock = FocusBlockLog(
-            date: Date(),
+        let block = FocusBlockLog(
+            id: session.id,
+            date: session.endedAt,
             label: effectiveBlockLabel,
-            minutes: minutes,
+            minutes: session.durationSeconds / 60,
             outcome: .good,
             projectID: project?.id,
-            projectName: project?.name
+            projectName: project?.name,
+            durationSeconds: session.durationSeconds,
+            targetSeconds: session.targetSeconds,
+            startedAt: session.startedAt
         )
+        pendingBlock = block
+        blockLogs.append(block)
         save()
     }
 
@@ -180,12 +204,13 @@ final class FocusJournal: ObservableObject {
         guard var block = pendingBlock else { return }
         pendingBlock = nil
         block.outcome = outcome
-        if keepLog {
+        if let index = blockLogs.firstIndex(where: { $0.id == block.id }) {
+            if keepLog { blockLogs[index] = block }
+            else { blockLogs.remove(at: index) }
+        } else if keepLog {
             blockLogs.append(block)
-            trimLogs()
-        } else {
-            save()
         }
+        save()
     }
 
     func logsToday() -> [FocusBlockLog] {
@@ -385,11 +410,6 @@ final class FocusJournal: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    private func trimLogs() {
-        let cutoff = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
-        blockLogs = blockLogs.filter { $0.date >= cutoff }
-    }
-
     private func save() {
         let state = FocusJournalState(
             day: day,
@@ -398,7 +418,8 @@ final class FocusJournal: ObservableObject {
             currentBlockLabel: currentBlockLabel,
             previousFocus: previousFocus,
             blockLogs: blockLogs,
-            currentProjectID: currentProjectID
+            currentProjectID: currentProjectID,
+            pendingBlock: pendingBlock
         )
         if let data = try? JSONEncoder().encode(state) {
             ud.set(data, forKey: key)

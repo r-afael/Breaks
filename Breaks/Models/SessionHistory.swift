@@ -24,27 +24,27 @@ struct StreakSnapshot {
 @MainActor
 final class SessionHistory: ObservableObject {
     @Published private(set) var records: [SessionRecord] = []
-    private let ud = UserDefaults.shared
+    private let ud: UserDefaults
     private let key = "sessionHistory"
-    private let retentionDays = 120
 
-    init() {
+    init(defaults: UserDefaults? = nil) {
+        self.ud = defaults ?? .shared
         load()
     }
 
-    func addCompletion() {
-        let today = Calendar.current.startOfDay(for: Date())
+    func addCompletion(on date: Date = Date()) {
+        let today = Calendar.current.startOfDay(for: date)
         if let index = records.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: today) }) {
             records[index].completedSessions += 1
         } else {
             records.append(SessionRecord(date: today, completedSessions: 1))
         }
-        prune()
+        records.sort { $0.date > $1.date }
         save()
     }
 
-    func removeCompletionToday() {
-        let today = Calendar.current.startOfDay(for: Date())
+    func removeCompletion(on date: Date) {
+        let today = Calendar.current.startOfDay(for: date)
         guard let index = records.firstIndex(where: { Calendar.current.isDate($0.date, inSameDayAs: today) }) else { return }
         records[index].completedSessions = max(0, records[index].completedSessions - 1)
         if records[index].completedSessions == 0 {
@@ -147,18 +147,10 @@ final class SessionHistory: ObservableObject {
         records.reduce(0) { $0 + $1.completedSessions }
     }
 
-    private func prune() {
-        let calendar = Calendar.current
-        let cutoff = calendar.date(byAdding: .day, value: -retentionDays, to: calendar.startOfDay(for: Date())) ?? Date.distantPast
-        records = records
-            .filter { $0.date >= cutoff }
-            .sorted { $0.date > $1.date }
-    }
-
     private func load() {
         if let data = ud.data(forKey: key), let decoded = try? JSONDecoder().decode([SessionRecord].self, from: data) {
             records = decoded
-            prune()
+            records.sort { $0.date > $1.date }
         }
     }
 

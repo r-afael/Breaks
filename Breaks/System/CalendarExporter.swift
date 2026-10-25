@@ -73,13 +73,14 @@ final class CalendarExporter: ObservableObject {
     /// Writes a completed work session as a calendar event. No-op if disabled,
     /// not authorized, or save fails (error surfaced via `lastError`).
     func exportCompletedSession(title: String,
-                                durationMinutes: Int,
+                                session: CompletedFocusSession,
                                 calendarIdentifier: String?) {
-        guard authState == .granted || authState == .writeOnly else { return }
-        guard durationMinutes > 0 else { return }
-
-        let end = Date()
-        let start = end.addingTimeInterval(TimeInterval(-durationMinutes * 60))
+        refreshAuthState()
+        guard authState == .granted || authState == .writeOnly else {
+            lastError = "Calendar access is unavailable. Your session is saved in the journal."
+            return
+        }
+        guard session.durationSeconds > 0 else { return }
 
         let calendar: EKCalendar?
         if let id = calendarIdentifier, let found = store.calendar(withIdentifier: id) {
@@ -93,9 +94,7 @@ final class CalendarExporter: ObservableObject {
         }
 
         let event = EKEvent(eventStore: store)
-        event.title = title.isEmpty ? "Focus session" : title
-        event.startDate = start
-        event.endDate = end
+        configure(event, title: title, session: session)
         event.calendar = target
 
         do {
@@ -105,4 +104,15 @@ final class CalendarExporter: ObservableObject {
             lastError = error.localizedDescription
         }
     }
+
+    func configure(_ event: EKEvent, title: String, session: CompletedFocusSession) {
+        event.title = title.isEmpty ? "Focus session" : title
+        event.startDate = session.startedAt
+        event.endDate = session.endedAt
+        event.notes = "Focused: \(FocusDuration.text(session.durationSeconds))\n"
+            + "Target: \(FocusDuration.text(session.targetSeconds))\n"
+            + "Overtime: \(FocusDuration.text(session.overtimeSeconds))\n"
+            + "Paused: \(FocusDuration.text(session.pausedSeconds))"
+    }
+
 }

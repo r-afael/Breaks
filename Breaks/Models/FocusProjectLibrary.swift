@@ -32,10 +32,11 @@ struct FocusProject: Identifiable, Codable, Equatable, Hashable {
 final class FocusProjectLibrary: ObservableObject {
     @Published var projects: [FocusProject] { didSet { save() } }
 
-    private let ud = UserDefaults.shared
+    private let ud: UserDefaults
     private let key = "focusProjectLibrary"
 
-    init() {
+    init(defaults: UserDefaults? = nil) {
+        self.ud = defaults ?? .shared
         if let data = ud.data(forKey: key),
            let decoded = try? JSONDecoder().decode([FocusProject].self, from: data) {
             projects = decoded

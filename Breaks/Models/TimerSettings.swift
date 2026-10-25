@@ -23,6 +23,7 @@ final class TimerSettings: ObservableObject {
     @Published var longMinutes: Int       { didSet { ud.set(longMinutes, forKey: "longMinutes") } }
     @Published var sessionsPerCycle: Int  { didSet { ud.set(sessionsPerCycle, forKey: "sessionsPerCycle") } }
     @Published var autoCycle: Bool        { didSet { ud.set(autoCycle, forKey: "autoCycle") } }
+    @Published var overtimeEnabled: Bool  { didSet { ud.set(overtimeEnabled, forKey: "overtimeEnabled") } }
     @Published var soundName: String      { didSet { ud.set(soundName, forKey: "soundName") } }
     @Published var volume: Double         { didSet { ud.set(volume, forKey: "volume") } }
     @Published var lastMode: String       { didSet { ud.set(lastMode, forKey: "lastMode") } }
@@ -43,15 +44,17 @@ final class TimerSettings: ObservableObject {
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var loginItemError: String?
 
-    private let ud = UserDefaults.shared
+    private let ud: UserDefaults
 
-    init() {
-        let ud = UserDefaults.shared
+    init(defaults: UserDefaults? = nil) {
+        let ud = defaults ?? .shared
+        self.ud = defaults ?? .shared
         workMinutes      = (ud.object(forKey: "workMinutes") as? Int) ?? 25
         shortMinutes     = (ud.object(forKey: "shortMinutes") as? Int) ?? 5
         longMinutes      = (ud.object(forKey: "longMinutes") as? Int) ?? 10
         sessionsPerCycle = (ud.object(forKey: "sessionsPerCycle") as? Int) ?? 4
         autoCycle        = (ud.object(forKey: "autoCycle") as? Bool) ?? true
+        overtimeEnabled  = (ud.object(forKey: "overtimeEnabled") as? Bool) ?? true
         soundName        = (ud.object(forKey: "soundName") as? String) ?? "Glass"
         volume           = (ud.object(forKey: "volume") as? Double) ?? 0.7
         lastMode         = (ud.object(forKey: "lastMode") as? String) ?? BreakTimer.Mode.work.rawValue
@@ -59,7 +62,7 @@ final class TimerSettings: ObservableObject {
         let storedAccent = ud.object(forKey: "accentColorHex") as? String
         accentColorHex   = (storedAccent == nil || storedAccent == "AccentColor") ? "#E8B56B" : storedAccent!
         hasCompletedOnboarding = (ud.object(forKey: "hasCompletedOnboarding") as? Bool) ?? false
-        idleDetectionEnabled = (ud.object(forKey: "idleDetectionEnabled") as? Bool) ?? true
+        idleDetectionEnabled = (ud.object(forKey: "idleDetectionEnabled") as? Bool) ?? false
         idleThresholdMinutes = (ud.object(forKey: "idleThresholdMinutes") as? Int) ?? 5
         pauseDaysPerWeek = (ud.object(forKey: "pauseDaysPerWeek") as? Int) ?? 1
         startHotkeyKeyCode = (ud.object(forKey: "startHotkeyKeyCode") as? Int) ?? Int(kVK_ANSI_B)

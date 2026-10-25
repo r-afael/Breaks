@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- Focus sessions continue into overtime by default. The menu bar and timer show `+MM:SS` after the target; Finish saves the full session, including an early finish.
+- Second-precision session history, with labels, dates and overtime, is available in Statistics.
+- Regression checks for overtime, pauses, sleep, relaunch, legacy data and Calendar event fields (`scripts/test-overtime.sh`).
+
+### Changed
+- Pauses are excluded from focused time; running sessions keep their target and elapsed time across sleep and relaunch. The target notification fires once per session.
+- Calendar export uses the actual session start/end and includes focused, target, overtime and paused time in event notes.
+- Finished sessions save immediately, before the optional reflection. Journal entries and daily totals are retained without a time cutoff.
+- New installations leave idle detection off so sessions keep running until paused or finished. Existing idle-detection preferences are preserved.
+- Settings → General → Continue into overtime restores the original automatic completion when turned off for the next session.
+
 ## [1.4.1] - 2026-05-07
 
 This release changes nothing about the app itself. It's about how you get it.

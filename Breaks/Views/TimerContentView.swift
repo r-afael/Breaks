@@ -169,7 +169,7 @@ struct TimerContent: View {
                             .font(.system(size: 14, weight: .semibold))
                     }
                     .keyboardShortcut(.space, modifiers: [])
-                    .disabled(timer.remaining == 0)
+                    .disabled(!timer.canStart)
                 }
             }
             .buttonStyle(HapticPrimaryButtonStyle(tint: settings.accentColor))
@@ -179,14 +179,23 @@ struct TimerContent: View {
                 Image(systemName: "arrow.counterclockwise")
             }
             .keyboardShortcut("r", modifiers: [])
-            .help("Reset")
+            .help("Discard this session and reset the timer")
+            .accessibilityLabel("Discard and reset session")
             .controlSize(.large)
             .buttonStyle(.bordered)
 
-            Button { timer.skip() } label: {
-                Image(systemName: "forward.end.fill")
+            Button {
+                if timer.hasActiveWorkSession { timer.finishFocus() }
+                else { timer.skip() }
+            } label: {
+                if timer.hasActiveWorkSession {
+                    Label("Finish", systemImage: "stop.fill")
+                } else {
+                    Image(systemName: "forward.end.fill")
+                }
             }
-            .help("Skip phase")
+            .accessibilityLabel(timer.hasActiveWorkSession ? "Finish and save session" : "Skip phase")
+            .help(timer.hasActiveWorkSession ? "Save the full session, including overtime" : "Skip phase")
             .controlSize(.large)
             .buttonStyle(.bordered)
         }
@@ -194,6 +203,8 @@ struct TimerContent: View {
     }
 
     private var startButtonTitle: String {
+        if timer.hasActiveWorkSession { return "Resume" }
+        if timer.mode != .work { return "Start break" }
         if journal.needsCheckIn { return "Start my day" }
         if timer.history.totalToday() == 0 { return "Start first block" }
         return "Start next block"

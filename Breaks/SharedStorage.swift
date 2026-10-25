@@ -19,6 +19,7 @@ enum TimerStorageKey {
     static let remaining = "timerRemaining"
     static let isRunning = "timerIsRunning"
     static let endDate = "timerEndDate"
+    static let focusSession = "activeFocusSession"
     static let completedWorkSessions = "completedWorkSessions"
 }
 

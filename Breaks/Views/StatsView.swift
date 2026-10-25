@@ -226,13 +226,15 @@ struct StatsView: View {
     @ObservedObject var settings: TimerSettings
     @ObservedObject var projects: FocusProjectLibrary
     @Binding var showing: Bool
+    @State private var sessionLimit = 20
+
     private var snapshot: StreakSnapshot {
         history.streakSnapshot(pauseDayBudget: settings.pauseDaysPerWeek)
     }
 
     var body: some View {
         let snap = snapshot
-        let hasData = !history.records.isEmpty || journal.focusedMinutesToday() > 0
+        let hasData = !history.records.isEmpty || !journal.blockLogs.isEmpty
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 ZStack {
@@ -269,6 +271,30 @@ struct StatsView: View {
 
                     Divider()
                     WeeklyReviewView(history: history, journal: journal, projects: projects)
+                    Divider()
+                    Text("Sessions")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(journal.blockLogs.sorted { $0.date > $1.date }.prefix(sessionLimit)) { block in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(block.label).lineLimit(2)
+                                Spacer(minLength: 8)
+                                Text(block.durationText).monospacedDigit()
+                            }
+                            Text(block.date.formatted(date: .abbreviated, time: .shortened))
+                                .foregroundStyle(.secondary)
+                            if block.overtimeSeconds > 0 {
+                                Text("Includes \(FocusDuration.text(block.overtimeSeconds)) overtime")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .font(.caption)
+                        .accessibilityElement(children: .combine)
+                    }
+                    if journal.blockLogs.count > sessionLimit {
+                        Button("Show more sessions") { sessionLimit += 20 }
+                    }
                     Divider()
                     Text("Recent days")
                         .font(.caption.weight(.semibold))

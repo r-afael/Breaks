@@ -52,82 +52,73 @@ final class BreakTimer: ObservableObject {
     }
 
     let settings: TimerSettings
-    let history = SessionHistory()
-    let journal = FocusJournal()
+    let history: SessionHistory
+    let journal: FocusJournal
     let clock = TickClock()
     let suggestions = BreakSuggestionLibrary()
     let calendarExporter = CalendarExporter()
-    let projects = FocusProjectLibrary()
+    let projects: FocusProjectLibrary
 
     @Published private(set) var mode: Mode
     @Published private(set) var duration: Int
-    /// Action-boundary remaining (start/pause/reset/setMode/fire). Per-tick
-    /// updates happen on `clock.remaining` so the popover doesn't cascade
-    /// re-renders every second.
+    /// Action-boundary updates only; per-second values go through TickClock.
     @Published private(set) var remaining: Int {
         didSet { clock.remaining = remaining }
     }
-    @Published private(set) var isRunning: Bool = false
-    @Published private(set) var completedWorkSessions: Int = 0 {
-        didSet { persistTimerState() }
-    }
+    @Published private(set) var isRunning = false
+    @Published private(set) var isOvertime = false
+    @Published private(set) var completedWorkSessions: Int
+    @Published private(set) var focusSession: FocusSessionTiming?
     @Published var idlePrompt: IdlePrompt?
 
+    private let defaults: UserDefaults
+    private let now: () -> Date
+    private let systemIntegrationEnabled: Bool
     private var ticker: Timer?
     private var endDate: Date?
     private var permissionRequested = false
     private var bag = Set<AnyCancellable>()
     var flowMode: Bool { settings.flowMode }
+    var hasActiveWorkSession: Bool { focusSession != nil }
+    var canStart: Bool { !isRunning && (hasActiveWorkSession || remaining > 0) }
 
-    init() {
-        let s = TimerSettings()
-        self.settings = s
+    init(defaults: UserDefaults = .shared,
+         now: @escaping () -> Date = Date.init,
+         systemIntegrationEnabled: Bool = true) {
+        self.defaults = defaults
+        self.now = now
+        self.systemIntegrationEnabled = systemIntegrationEnabled
+        let s = TimerSettings(defaults: defaults)
+        settings = s
+        history = SessionHistory(defaults: defaults)
+        journal = FocusJournal(defaults: defaults)
+        projects = FocusProjectLibrary(defaults: defaults)
+        let restoredMode = Mode(rawValue: defaults.string(forKey: TimerStorageKey.mode) ?? s.lastMode) ?? .work
+        let restoredDuration = s.minutes(for: restoredMode) * 60
+        mode = restoredMode
+        duration = restoredDuration
+        remaining = restoredDuration
+        completedWorkSessions = defaults.integer(forKey: TimerStorageKey.completedWorkSessions)
         journal.projectLibrary = projects
-        let ud = UserDefaults.shared
-        let restoredMode = Mode(rawValue: (ud.object(forKey: TimerStorageKey.mode) as? String) ?? s.lastMode) ?? .work
-        self.mode = restoredMode
-        let d = s.minutes(for: restoredMode) * 60
-        self.duration = d
-        self.completedWorkSessions = (ud.object(forKey: TimerStorageKey.completedWorkSessions) as? Int) ?? 0
+        restoreTimerState()
 
-        if let savedEndDate = ud.object(forKey: TimerStorageKey.endDate) as? Date,
-           (ud.object(forKey: TimerStorageKey.isRunning) as? Bool) == true,
-           savedEndDate > Date() {
-            self.remaining = max(1, Int(savedEndDate.timeIntervalSinceNow.rounded()))
-            self.isRunning = true
-            self.endDate = savedEndDate
-            scheduleTicker()
-        } else if let savedRemaining = ud.object(forKey: TimerStorageKey.remaining) as? Int,
-                  savedRemaining > 0,
-                  savedRemaining <= d {
-            self.remaining = savedRemaining
-        } else {
-            self.remaining = d
-            clearExpiredRunningState()
+        if systemIntegrationEnabled {
+            if s.hasCompletedOnboarding {
+                Task { await requestPermissionIfNeeded() }
+            }
+            let ws = NSWorkspace.shared.notificationCenter
+            ws.addObserver(self, selector: #selector(handleSleep),
+                           name: NSWorkspace.willSleepNotification, object: nil)
+            ws.addObserver(self, selector: #selector(handleWake),
+                           name: NSWorkspace.didWakeNotification, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(saveStateOnQuit),
+                                                   name: NSApplication.willTerminateNotification, object: nil)
         }
-        clock.remaining = remaining
-
-        // Only auto-request for legacy users who already onboarded; new users
-        // grant explicitly from the onboarding screen.
-        if s.hasCompletedOnboarding {
-            Task { await requestPermissionIfNeeded() }
-        }
-
         s.objectWillChange
             .sink { [weak self] in
                 DispatchQueue.main.async { self?.refreshIdleDuration() }
             }
             .store(in: &bag)
-
-        let ws = NSWorkspace.shared.notificationCenter
-        ws.addObserver(self, selector: #selector(handleSleep),
-                       name: NSWorkspace.willSleepNotification, object: nil)
-        ws.addObserver(self, selector: #selector(handleWake),
-                       name: NSWorkspace.didWakeNotification, object: nil)
-
-        // Save state on quit
-        NotificationCenter.default.addObserver(self, selector: #selector(saveStateOnQuit),
-                                               name: NSApplication.willTerminateNotification, object: nil)
     }
 
     deinit {
@@ -137,55 +128,99 @@ final class BreakTimer: ObservableObject {
     }
 
     // MARK: Display
-    var menuIcon: String { isRunning ? mode.icon : "timer" }
+    var menuIcon: String { isOvertime ? "timer" : (isRunning ? mode.icon : "timer") }
 
     func menuBarTitle(for current: Int) -> String? {
-        guard isRunning || current != duration else { return nil }
+        guard isRunning || hasActiveWorkSession || current != duration else { return nil }
         return formatted(current)
     }
 
     func formatted(_ seconds: Int) -> String {
-        let s = max(0, seconds)
-        return String(format: "%02d:%02d", s / 60, s % 60)
+        let value = abs(seconds)
+        let prefix = seconds < 0 || (seconds == 0 && isOvertime) ? "+" : ""
+        return prefix + String(format: "%02d:%02d", value / 60, value % 60)
     }
 
     // MARK: Actions
     func setMode(_ mode: Mode) {
+        guard mode != self.mode else { return }
+        if hasActiveWorkSession { finishFocus() }
         stopTicker()
         self.mode = mode
         settings.lastMode = mode.rawValue
-        let d = settings.minutes(for: mode) * 60
-        duration = d
-        remaining = d
+        duration = settings.minutes(for: mode) * 60
+        remaining = duration
+        isOvertime = false
+        idlePrompt = nil
         persistTimerState()
     }
 
     func start() {
-        guard !isRunning, remaining > 0 else { return }
-        if journal.needsCheckIn {
-            journal.startDay(with: "Focus")
-        }
+        guard canStart else { return }
+        let date = now()
+        if journal.needsCheckIn { journal.startDay(with: "Focus") }
         idlePrompt = nil
+        if mode == .work {
+            if focusSession == nil {
+                // Capture settings for this session so editing preferences cannot
+                // change its target or end it unexpectedly while paused.
+                focusSession = FocusSessionTiming(startedAt: date,
+                                                  targetSeconds: duration,
+                                                  allowsOvertime: settings.overtimeEnabled)
+            } else {
+                focusSession?.resume(at: date)
+            }
+            endDate = focusSession?.deadline
+        } else {
+            endDate = date.addingTimeInterval(TimeInterval(remaining))
+        }
         isRunning = true
-        endDate = Date().addingTimeInterval(TimeInterval(remaining))
         scheduleTicker()
         persistTimerState()
     }
 
     func pause() {
         guard isRunning else { return }
-        syncRemaining()
+        let date = now()
+        if let session = focusSession, !session.allowsOvertime,
+           let deadline = session.deadline, date >= deadline {
+            completeFocus(session.completed(at: deadline))
+            return
+        }
+        if focusSession != nil {
+            focusSession?.pause(at: date)
+            updateFocusDisplay(at: date)
+        } else {
+            syncRemaining()
+        }
         stopTicker()
         persistTimerState()
     }
 
+    /// Save once, including overtime, and leave the break ready to start.
+    func finishFocus() {
+        guard let session = focusSession else { return }
+        let date = now()
+        let finish = !session.allowsOvertime ? min(date, session.deadline ?? date) : date
+        completeFocus(session.completed(at: finish))
+        advanceMode()
+    }
+
     func reset() {
         stopTicker()
+        focusSession = nil
+        isOvertime = false
+        idlePrompt = nil
+        duration = settings.minutes(for: mode) * 60
         remaining = duration
         persistTimerState()
     }
 
     func skip() {
+        if hasActiveWorkSession {
+            finishFocus()
+            return
+        }
         let wasRunning = isRunning
         stopTicker()
         advanceMode()
@@ -193,32 +228,27 @@ final class BreakTimer: ObservableObject {
     }
 
     func resetCycle() {
-        stopTicker()
+        reset()
         completedWorkSessions = 0
         setMode(.work)
         persistTimerState()
     }
 
     func resetToday() {
-        stopTicker()
-        completedWorkSessions = 0
+        resetCycle()
         history.clearToday()
         journal.resetToday()
-        setMode(.work)
-        persistTimerState()
     }
 
     func resolvePendingBlock(as outcome: FocusOutcome) {
-        if outcome == .skipped {
-            history.removeCompletionToday()
+        if outcome == .skipped, let block = journal.pendingBlock {
+            history.removeCompletion(on: block.date)
             completedWorkSessions = max(0, completedWorkSessions - 1)
             journal.resolvePendingBlock(as: outcome, keepLog: false)
         } else {
             journal.resolvePendingBlock(as: outcome)
         }
-        if settings.autoCycle, !isRunning, mode != .work, remaining > 0 {
-            start()
-        }
+        persistTimerState()
     }
 
     func resumeAfterIdle() {
@@ -227,13 +257,12 @@ final class BreakTimer: ObservableObject {
     }
 
     func resetAfterIdle() {
-        idlePrompt = nil
         reset()
     }
 
     // MARK: Internals
     private func refreshIdleDuration() {
-        guard !isRunning else { return }
+        guard !isRunning, !hasActiveWorkSession else { return }
         let new = settings.minutes(for: mode) * 60
         if duration != new {
             duration = new
@@ -243,11 +272,21 @@ final class BreakTimer: ObservableObject {
     }
 
     private func syncRemaining() {
-        guard let endDate else { return }
-        remaining = max(0, Int(endDate.timeIntervalSinceNow.rounded()))
+        if focusSession != nil {
+            updateFocusDisplay(at: now())
+        } else if let endDate {
+            remaining = max(0, Int(ceil(endDate.timeIntervalSince(now()))))
+        }
+    }
+
+    private func updateFocusDisplay(at date: Date) {
+        guard let session = focusSession else { return }
+        remaining = session.remaining(at: date)
+        isOvertime = session.allowsOvertime && session.elapsed(at: date) >= Double(session.targetSeconds)
     }
 
     private func scheduleTicker() {
+        guard systemIntegrationEnabled else { return }
         ticker?.invalidate()
         let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.tick() }
@@ -264,61 +303,83 @@ final class BreakTimer: ObservableObject {
         endDate = nil
     }
 
-    private func tick() {
-        guard let endDate else { return }
-        let secs = max(0, Int(endDate.timeIntervalSinceNow.rounded()))
-        // Per-tick updates write only to `clock` so the popover does not
-        // re-render the entire view tree every second. `remaining` is only
-        // touched on action boundaries (start/pause/reset/setMode/fire).
-        clock.remaining = secs
-        detectIdleIfNeeded()
-        if secs <= 0 {
-            remaining = 0
-            fire()
+    func tick() {
+        guard isRunning else { return }
+        let date = now()
+        if systemIntegrationEnabled { detectIdleIfNeeded(at: date) }
+        guard isRunning else { return }
+        if let session = focusSession {
+            let seconds = session.remaining(at: date)
+            clock.remaining = seconds
+            guard session.elapsed(at: date) >= Double(session.targetSeconds) else { return }
+            if session.allowsOvertime {
+                if !isOvertime { isOvertime = true }
+                if !session.targetWasAnnounced {
+                    focusSession?.targetWasAnnounced = true
+                    playSound()
+                    postNotification(for: .work, overtime: true)
+                    persistTimerState()
+                }
+            } else {
+                let completed = session.completed(at: session.deadline ?? date)
+                playSound()
+                postNotification(for: .work)
+                completeFocus(completed)
+                if settings.autoCycle {
+                    advanceMode()
+                    start()
+                }
+            }
+        } else if let endDate {
+            clock.remaining = max(0, Int(ceil(endDate.timeIntervalSince(date))))
+            if date >= endDate { finishBreak() }
         }
     }
 
-    private func detectIdleIfNeeded() {
+    private func detectIdleIfNeeded(at date: Date) {
         guard settings.idleDetectionEnabled,
               idlePrompt == nil,
-              isRunning,
-              mode == .work else { return }
+              let session = focusSession,
+              let resumedAt = session.resumedAt else { return }
         let idleSeconds = CGEventSource.secondsSinceLastEventType(
-            .combinedSessionState,
-            eventType: CGEventType(rawValue: ~0)!
-        )
+            .combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
         guard idleSeconds >= TimeInterval(settings.idleThresholdMinutes * 60) else { return }
-        syncRemaining()
+        focusSession?.pause(at: max(resumedAt, date.addingTimeInterval(-idleSeconds)))
+        updateFocusDisplay(at: date)
         stopTicker()
-        // Restore the wasted seconds so the user doesn't lose timer time while away.
-        let restored = min(duration, remaining + Int(idleSeconds))
-        remaining = max(0, restored)
         idlePrompt = IdlePrompt(idleSeconds: idleSeconds)
         persistTimerState()
     }
 
-    private func fire() {
+    private func completeFocus(_ completed: CompletedFocusSession) {
+        stopTicker()
+        focusSession = nil
+        remaining = 0
+        isOvertime = false
+        idlePrompt = nil
+        if completed.durationSeconds > 0,
+           !journal.blockLogs.contains(where: { $0.id == completed.id }) {
+            completedWorkSessions += 1
+            history.addCompletion(on: completed.endedAt)
+            journal.recordCompletedWork(session: completed)
+            if settings.calendarExportEnabled && systemIntegrationEnabled {
+                calendarExporter.exportCompletedSession(
+                    title: journal.effectiveBlockLabel,
+                    session: completed,
+                    calendarIdentifier: settings.calendarExportIdentifier.isEmpty ? nil : settings.calendarExportIdentifier
+                )
+            }
+        }
+        persistTimerState()
+    }
+
+    private func finishBreak() {
         let finished = mode
         stopTicker()
         remaining = 0
         playSound()
         postNotification(for: finished)
-
-        if finished == .work {
-            completedWorkSessions += 1
-            history.addCompletion()
-            journal.recordCompletedWork(minutes: settings.workMinutes)
-            if settings.calendarExportEnabled {
-                calendarExporter.exportCompletedSession(
-                    title: journal.effectiveBlockLabel,
-                    durationMinutes: settings.workMinutes,
-                    calendarIdentifier: settings.calendarExportIdentifier.isEmpty ? nil : settings.calendarExportIdentifier
-                )
-            }
-        } else if finished == .longBreak {
-            completedWorkSessions = 0
-        }
-
+        if finished == .longBreak { completedWorkSessions = 0 }
         if settings.autoCycle {
             advanceMode()
             start()
@@ -328,62 +389,93 @@ final class BreakTimer: ObservableObject {
     }
 
     private func advanceMode() {
-        let next: Mode
         switch mode {
         case .work:
-            let done = completedWorkSessions
-            next = (done > 0 && done % settings.sessionsPerCycle == 0) ? .longBreak : .shortBreak
+            mode = completedWorkSessions > 0 && completedWorkSessions % settings.sessionsPerCycle == 0
+                ? .longBreak : .shortBreak
         case .shortBreak, .longBreak:
-            next = .work
+            mode = .work
         }
-        mode = next
-        settings.lastMode = next.rawValue
-        let d = settings.minutes(for: next) * 60
-        duration = d
-        remaining = d
+        settings.lastMode = mode.rawValue
+        duration = settings.minutes(for: mode) * 60
+        remaining = duration
+        isOvertime = false
         persistTimerState()
     }
 
-    @objc private func handleSleep() {
+    @objc func handleSleep() {
         ticker?.invalidate()
         ticker = nil
+        persistTimerState()
     }
 
-    @objc private func handleWake() {
+    @objc func handleWake() {
         guard isRunning else { return }
-        if let endDate, endDate.timeIntervalSinceNow <= 0 {
-            remaining = 0
-            fire()
-        } else {
-            syncRemaining()
-            scheduleTicker()
-            persistTimerState()
-        }
+        tick()
+        if isRunning { scheduleTicker() }
+        persistTimerState()
     }
 
     @objc private func saveStateOnQuit() {
-        if isRunning { syncRemaining() }
+        syncRemaining()
         persistTimerState()
     }
 
     private func persistTimerState() {
-        let ud = UserDefaults.shared
-        ud.set(mode.rawValue, forKey: TimerStorageKey.mode)
-        ud.set(remaining, forKey: TimerStorageKey.remaining)
-        ud.set(isRunning, forKey: TimerStorageKey.isRunning)
-        ud.set(completedWorkSessions, forKey: TimerStorageKey.completedWorkSessions)
-        if isRunning, let endDate {
-            ud.set(endDate, forKey: TimerStorageKey.endDate)
+        defaults.set(mode.rawValue, forKey: TimerStorageKey.mode)
+        defaults.set(remaining, forKey: TimerStorageKey.remaining)
+        defaults.set(isRunning, forKey: TimerStorageKey.isRunning)
+        defaults.set(completedWorkSessions, forKey: TimerStorageKey.completedWorkSessions)
+        if let session = focusSession, let data = try? JSONEncoder().encode(session) {
+            defaults.set(data, forKey: TimerStorageKey.focusSession)
         } else {
-            ud.removeObject(forKey: TimerStorageKey.endDate)
+            defaults.removeObject(forKey: TimerStorageKey.focusSession)
+        }
+        if isRunning, let endDate {
+            defaults.set(endDate, forKey: TimerStorageKey.endDate)
+        } else {
+            defaults.removeObject(forKey: TimerStorageKey.endDate)
         }
     }
 
-    private func clearExpiredRunningState() {
-        let ud = UserDefaults.shared
-        ud.removeObject(forKey: TimerStorageKey.endDate)
-        ud.removeObject(forKey: "savedEndDate")
-        ud.removeObject(forKey: "savedRemaining")
+    private func restoreTimerState() {
+        let date = now()
+        if mode == .work,
+           let data = defaults.data(forKey: TimerStorageKey.focusSession),
+           let session = try? JSONDecoder().decode(FocusSessionTiming.self, from: data) {
+            focusSession = session
+            duration = session.targetSeconds
+            isRunning = session.isRunning
+            endDate = session.deadline
+            updateFocusDisplay(at: date)
+        } else if let savedEnd = defaults.object(forKey: TimerStorageKey.endDate) as? Date,
+                  defaults.bool(forKey: TimerStorageKey.isRunning) {
+            isRunning = true
+            endDate = savedEnd
+            if mode == .work {
+                focusSession = FocusSessionTiming(startedAt: savedEnd.addingTimeInterval(-Double(duration)),
+                                                  targetSeconds: duration,
+                                                  allowsOvertime: settings.overtimeEnabled)
+                updateFocusDisplay(at: date)
+            } else {
+                remaining = max(0, Int(ceil(savedEnd.timeIntervalSince(date))))
+            }
+        } else if let saved = defaults.object(forKey: TimerStorageKey.remaining) as? Int,
+                  saved >= 0, saved <= duration {
+            remaining = saved
+            if mode == .work, saved > 0, saved < duration {
+                var session = FocusSessionTiming(startedAt: date.addingTimeInterval(-Double(duration - saved)),
+                                                 targetSeconds: duration,
+                                                 allowsOvertime: settings.overtimeEnabled)
+                session.pause(at: date)
+                focusSession = session
+            }
+        }
+        clock.remaining = remaining
+        if isRunning {
+            tick()
+            if isRunning { scheduleTicker() }
+        }
     }
 
     // MARK: Notifications + Sound
@@ -394,10 +486,12 @@ final class BreakTimer: ObservableObject {
             .requestAuthorization(options: [.alert, .sound])
     }
 
-    private func postNotification(for mode: Mode) {
+    private func postNotification(for mode: Mode, overtime: Bool = false) {
+        guard systemIntegrationEnabled else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(mode.rawValue) finished"
-        content.body = mode == .work ? "Time for a break." : "Back to focus."
+        content.title = overtime ? "Focus target reached" : "\(mode.rawValue) finished"
+        content.body = overtime ? "Overtime is being tracked. Finish when you are ready."
+            : (mode == .work ? "Time for a break." : "Back to focus.")
         content.sound = .default
         content.threadIdentifier = "breaks.timer"
         let identifier = "breaks.timer.\(mode.rawValue.lowercased().replacingOccurrences(of: " ", with: "-"))"
@@ -410,6 +504,7 @@ final class BreakTimer: ObservableObject {
     }
 
     private func playSound() {
+        guard systemIntegrationEnabled else { return }
         guard let sound = NSSound(named: NSSound.Name(settings.soundName)) else { return }
         sound.volume = Float(settings.volume)
         sound.play()

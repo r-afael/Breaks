@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Breaks is a macOS menu-bar Pomodoro app written in SwiftUI. The codebase is organized into focused files across `Models/`, `Views/`, `Style/`, and `System/` directories. There is no Swift Package Manager, no test target, no lint config.
+Breaks is a macOS menu-bar Pomodoro app written in SwiftUI. The codebase is organized into focused files across `Models/`, `Views/`, `Style/`, and `System/` directories. There is no Swift Package Manager, Xcode test target, or lint config. `scripts/test-overtime.sh` compiles and runs deterministic regression checks against production timer code.
 
 - Bundle ID: `com.gjinprelvukaj.Breaks`
 - Deployment target: macOS 13.0
@@ -27,7 +27,7 @@ To wipe persisted state during development (settings, timer state, session histo
 defaults delete com.gjinprelvukaj.Breaks
 ```
 
-There are no automated tests. UI is exercised manually via the menu-bar popover.
+Run `scripts/test-overtime.sh` for timer and persistence regression checks. UI is exercised manually via the menu-bar popover.
 
 ## Architecture
 
@@ -82,8 +82,8 @@ Modes are `Mode.work | .shortBreak | .longBreak`; the cycle advances based on `c
 ### Persistence
 All state lives in `UserDefaults.standard`. Three independently-loaded blobs:
 - Scalar settings — keyed individually (`workMinutes`, `soundName`, hotkey codes, etc.).
-- Timer state — `timerMode`, `timerRemaining`, `timerIsRunning`, `timerEndDate`, `completedWorkSessions`. On launch, if `isRunning` was true and `endDate` is still in the future, the timer auto-resumes; otherwise it restores remaining seconds or resets.
-- JSON-encoded — `sessionHistory` (`[SessionRecord]`, pruned to 120 days) and `focusJournalState` (`FocusJournalState`, logs trimmed to 30 days).
+- Timer state — `timerMode`, `timerRemaining`, `timerIsRunning`, `timerEndDate`, `completedWorkSessions`, and the Codable `activeFocusSession`. FocusSessionTiming stores active intervals, the original target and overtime policy; negative remaining values represent overtime and restore across relaunch.
+- JSON-encoded — `sessionHistory` (`[SessionRecord]`) and `focusJournalState` (`FocusJournalState`, including an optional pending reflection). Both retain history without a time cutoff. New journal entries include precise seconds and timestamps; legacy minute-only entries still decode.
 
 `SessionHistory.streakSnapshot` is the non-trivial logic here: it walks day-by-day from the earliest record forward, decaying the streak by 1 per missed day, except the first N missed days each ISO week are absorbed by the pause budget instead.
 
@@ -108,7 +108,7 @@ All state lives in `UserDefaults.standard`. Three independently-loaded blobs:
 - Settings are persisted via per-property `didSet`, not a single save call. New settings should follow the same pattern (init from `UserDefaults.object(forKey:) as? T ?? default`, write on `didSet`).
 - `@MainActor` is applied to ObservableObjects that touch UI state (`TimerSettings`, `NotificationPermissions`, `FocusJournal`, `SessionHistory`, `TickClock`). Keep this when adding new state holders.
 - When adding state that needs to drive per-second UI, route it through `TickClock` (or a similar dedicated object) rather than adding more `@Published` properties to `BreakTimer`.
-- Pruning is done at write time, not read time (see `SessionHistory.prune`, `FocusJournal.trimLogs`). Preserve this so cold-start reads stay cheap.
+- Keep journal entries and daily totals indefinitely. Finish saves before reflection; resolving reflection must update the existing entry, not append a duplicate.
 - Hotkey IDs are hard-coded (`1` start, `2` skip, `3` reset). If adding a fourth, also extend `HotkeyAction` and `reloadHotkeys`.
 - The project uses `SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES` — every file must explicitly import the modules it needs (e.g. `import Combine` for `@Published`/`ObservableObject`). Transitive imports from `SwiftUI` are not enough.
 - The Xcode project uses `PBXFileSystemSynchronizedRootGroup`, so new files added to the `Breaks/` directory are automatically discovered by the build system — no `.pbxproj` edits needed.

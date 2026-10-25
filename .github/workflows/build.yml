@@ -21,6 +21,9 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Timer regression checks
+        run: scripts/test-overtime.sh
+
       - name: Build (Debug, unsigned)
         run: |
           xcodebuild \

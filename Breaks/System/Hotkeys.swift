@@ -12,7 +12,7 @@ enum HotkeyAction: CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .startPause: return "Start / pause"
-        case .skip: return "Skip"
+        case .skip: return "Finish focus / skip break"
         case .resetCycle: return "Reset cycle"
         }
     }

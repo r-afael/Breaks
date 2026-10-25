@@ -27,9 +27,9 @@ struct TimerRing: View {
                 Text(timer.formatted(clock.remaining))
                     .font(.system(size: 42, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .contentTransition(.numericText(countsDown: true))
+                    .contentTransition(.numericText(countsDown: !timer.isOvertime))
                     .animation(.snappy(duration: 0.25), value: clock.remaining)
-                Text(timer.isRunning ? "Focus" : "Ready")
+                Text(statusText)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(timer.isRunning ? accentColor : .secondary)
                     .textCase(.uppercase)
@@ -38,6 +38,15 @@ struct TimerRing: View {
             }
         }
         .frame(width: 172, height: 172)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(statusText)
+        .accessibilityValue(timer.formatted(clock.remaining))
+    }
+
+    private var statusText: String {
+        if timer.isOvertime { return timer.isRunning ? "Overtime" : "Overtime · paused" }
+        if timer.hasActiveWorkSession && !timer.isRunning { return "Paused" }
+        return timer.isRunning ? timer.mode.shortLabel : "Ready"
     }
 
     private var progress: Double {

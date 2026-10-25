@@ -82,7 +82,7 @@ enum MarkdownExporter {
                 case .skipped: icon = "✗"
                 }
                 let project = log.projectName.flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
-                out.append("- \(icon) **\(timeFmt.string(from: log.date))** — \(log.label) (\(log.minutes)m\(project))")
+                out.append("- \(icon) **\(timeFmt.string(from: log.date))** — \(log.label) (\(log.durationText)\(project))")
             }
             out.append("")
         }
